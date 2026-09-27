@@ -22,6 +22,7 @@
     <ProjectReference Include="..\..\src\Argentum.Core\Argentum.Core.csproj" />
     <ProjectReference Include="..\..\src\Argentum.Network\Argentum.Network.csproj" />
     <ProjectReference Include="..\..\src\Argentum.Gameplay\Argentum.Gameplay.csproj" />
+    <ProjectReference Include="..\..\src\Argentum.Server\Argentum.Server.csproj" />
   </ItemGroup>
 
 </Project>
