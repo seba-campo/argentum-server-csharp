@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using Argentum.Network.Connections;
@@ -23,11 +23,21 @@ public sealed class TcpGameServer : IDisposable
     public int Port => _port;
     public int ActiveConnectionsCount => _sessions.Count;
 
+    public event Action<ClientSession>? ClientDisconnected;
+
     public TcpGameServer(int port, PacketDispatcher dispatcher, ILogger<TcpGameServer> logger)
     {
         _port = port;
         _dispatcher = dispatcher;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// Intenta obtener la sesión de un cliente por su ID de conexión.
+    /// </summary>
+    public bool TryGetSession(int connectionId, out ClientSession? session)
+    {
+        return _sessions.TryGetValue(connectionId, out session);
     }
 
     /// <summary>
@@ -86,6 +96,8 @@ public sealed class TcpGameServer : IDisposable
         {
             _logger.LogInformation("Cliente desconectado [ID: {ConnectionId}]. Conexiones activas: {Total}",
                 session.Id, _sessions.Count);
+
+            ClientDisconnected?.Invoke(session);
         }
     }
 

@@ -1,3 +1,6 @@
+﻿using Argentum.Core.Maps;
+using Argentum.Core.Spatial;
+using Argentum.Core.World;
 using Argentum.Network.Packets;
 using Argentum.Network.Packets.Incoming;
 using Argentum.Network.Packets.Outgoing;
@@ -35,7 +38,15 @@ Console.ResetColor();
 
 const int serverPort = 7666;
 
-// 2. Configurar el Enrutador de Paquetes (Dispatcher)
+// 2. Inicializar el Administrador del Mundo (WorldManager)
+var worldManager = new WorldManager();
+
+// Cargamos un mapa inicial (Mapa 1: Ullathorpe)
+var ullathorpe = new Map(1, "Ullathorpe");
+worldManager.AddMap(ullathorpe);
+logger.LogInformation("Mundo inicializado con {MapCount} mapa(s).", worldManager.MapCount);
+
+// 3. Configurar el Enrutador de Paquetes (Dispatcher)
 var dispatcher = new PacketDispatcher();
 
 // Registrar qué hacer cuando llega un paquete no reconocido
@@ -45,6 +56,9 @@ dispatcher.UnhandledPacket += (session, packetId) =>
         session.Id, packetId, (short)packetId);
 };
 
+// 4. Instanciar el Servidor TCP
+TcpGameServer? server = null;
+
 // Registrar el controlador para eLoginExistingChar
 dispatcher.RegisterHandler(
     ClientPacketId.eLoginExistingChar,
@@ -53,6 +67,21 @@ dispatcher.RegisterHandler(
     {
         logger.LogInformation("[ID: {ConnectionId}] -> Recibido Login: Usuario='{Username}', CharId={CharId}",
             session.Id, packet.Username, packet.CharacterId);
+
+        // Ubicar al jugador en el mapa (por defecto mapa 1, posición 50, 50)
+        var spawnPos = new Position(1, 50, 50);
+        bool spawned = worldManager.SpawnPlayer(session.Id, spawnPos);
+
+        if (spawned)
+        {
+            logger.LogInformation("[ID: {ConnectionId}] Jugador '{Username}' posicionado en Mapa {Map} ({X}, {Y}).",
+                session.Id, packet.Username, spawnPos.Map, spawnPos.X, spawnPos.Y);
+        }
+        else
+        {
+            logger.LogWarning("[ID: {ConnectionId}] No se pudo ubicar al jugador en la posición inicial {Pos}.",
+                session.Id, spawnPos);
+        }
 
         // Responder con la confirmación de Login (eLogged)
         logger.LogInformation("[ID: {ConnectionId}] <- Enviando confirmación de Login (eLogged)...", session.Id);
@@ -68,16 +97,87 @@ dispatcher.RegisterHandler(
     }
 );
 
-// 3. Iniciar el Servidor TCP
-using var server = new TcpGameServer(
+// Registrar el controlador para eWalk (Caminata)
+dispatcher.RegisterHandler(
+    ClientPacketId.eWalk,
+    deserializer: WalkPacket.Deserialize,
+    handler: async (session, packet) =>
+    {
+        var newPos = worldManager.MovePlayer(session.Id, packet.Heading);
+
+        if (newPos.HasValue)
+        {
+            logger.LogInformation("[ID: {ConnectionId}] Avanzó hacia {Heading} -> Nueva posición: Mapa {Map} ({X}, {Y})",
+                session.Id, packet.Heading, newPos.Value.Map, newPos.Value.X, newPos.Value.Y);
+
+            // Notificar a los demás jugadores cercanos en el área para que vean la animación de caminar
+            var nearbyPlayerIds = worldManager.GetNearbyPlayers(newPos.Value, excludePlayerId: session.Id);
+            if (nearbyPlayerIds.Count > 0 && server != null)
+            {
+                var movePacket = new CharacterMovePacket(
+                    CharacterIndex: (short)session.Id,
+                    X: newPos.Value.X,
+                    Y: newPos.Value.Y
+                );
+
+                foreach (int nearbyId in nearbyPlayerIds)
+                {
+                    if (server.TryGetSession(nearbyId, out var nearbySession) && nearbySession != null)
+                    {
+                        await nearbySession.SendAsync(movePacket);
+                    }
+                }
+            }
+        }
+        else
+        {
+            var currentPos = worldManager.GetPlayerPosition(session.Id);
+            logger.LogWarning("[ID: {ConnectionId}] Intento de paso inválido hacia {Heading}. Se mantiene en {Pos}",
+                session.Id, packet.Heading, currentPos);
+
+            // Sincronización forzada en caso de paso bloqueado / desfasaje
+            if (currentPos.HasValue)
+            {
+                await session.SendAsync(new PosUpdatePacket(currentPos.Value.X, currentPos.Value.Y));
+            }
+        }
+    }
+);
+
+// Registrar el controlador para eRequestPositionUpdate (Solicitud de posición por lag/desync)
+dispatcher.RegisterHandler(
+    ClientPacketId.eRequestPositionUpdate,
+    deserializer: RequestPositionUpdatePacket.Deserialize,
+    handler: async (session, packet) =>
+    {
+        var currentPos = worldManager.GetPlayerPosition(session.Id);
+        if (currentPos.HasValue)
+        {
+            logger.LogInformation("[ID: {ConnectionId}] Cliente solicitó actualización de posición -> Enviando {X}, {Y}",
+                session.Id, currentPos.Value.X, currentPos.Value.Y);
+
+            await session.SendAsync(new PosUpdatePacket(currentPos.Value.X, currentPos.Value.Y));
+        }
+    }
+);
+
+// 5. Iniciar el Servidor TCP
+server = new TcpGameServer(
     serverPort,
     dispatcher,
     loggerFactory.CreateLogger<TcpGameServer>()
 );
 
+// Limpiar del mundo al jugador cuando se desconecta
+server.ClientDisconnected += session =>
+{
+    worldManager.DespawnPlayer(session.Id);
+    logger.LogInformation("[ID: {ConnectionId}] Jugador removido del mundo al desconectarse.", session.Id);
+};
+
 server.Start();
 
-// 4. Mantener la aplicación viva hasta que el usuario presione Ctrl+C
+// 6. Mantener la aplicación viva hasta que el usuario presione Ctrl+C
 var cts = new CancellationTokenSource();
 Console.CancelKeyPress += (sender, eventArgs) =>
 {
